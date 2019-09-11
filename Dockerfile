@@ -1,3 +1,9 @@
+FROM golang:1.13.0 as build
+ADD . / src/
+RUN cd src \
+ && go test ./... \
+ && go build -o /entrypoint entrypoint.go
+
 FROM docker:19.03.1 as runtime
 LABEL "com.github.actions.name"="Publish Docker"
 LABEL "com.github.actions.description"="Uses the git branch as the docker tag and pushes the container"
@@ -11,15 +17,5 @@ RUN apk update \
   && apk upgrade \
   && apk add --no-cache git
 
-ADD entrypoint.sh /entrypoint.sh
-ENTRYPOINT ["/entrypoint.sh"]
-
-FROM runtime as test
-ADD test.sh /test.sh
-ADD stub.sh /fake_bin/docker
-ADD mock.sh /fake_bin/date
-# Use mock instead of real docker
-ENV PATH="/fake_bin:usr/bin:/bin"
-RUN /test.sh
-
-FROM runtime
+COPY --from=build /entrypoint /entrypoint
+ENTRYPOINT ["/entrypoint"]
