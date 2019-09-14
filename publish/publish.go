@@ -1,12 +1,19 @@
 package publish
 
 import (
+	"bufio"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/registry"
+	"github.com/mholt/archiver"
 	"io"
+	"io/ioutil"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -23,57 +30,126 @@ func Publish(cli Cli, path string, buildTime time.Time) error {
 	name := os.Getenv("INPUT_NAME")
 	username := os.Getenv("INPUT_USERNAME")
 	password := os.Getenv("INPUT_PASSWORD")
-	e := sanitizeInput(name, username, password)
-	if e != nil {
-		return e
+	if err := sanitizeInput(name, username, password); err != nil {
+		return err
 	}
 
 	ctx := context.Background()
-	config := types.AuthConfig{
+
+	authConfig := types.AuthConfig{
 		Username:      username,
 		Password:      password,
 		ServerAddress: readServerAddress(),
 	}
-	if _, err := cli.RegistryLogin(ctx, config); err != nil {
-		return err
-	}
-
-	buildOptions := types.ImageBuildOptions{}
-	if os.Getenv("INPUT_CACHE") != "" {
-		if r, err := cli.ImagePull(ctx, name, types.ImagePullOptions{}); err == nil {
-			r.Close()
-			buildOptions.CacheFrom = []string{name}
-		}
-	}
-
-	useTags(&buildOptions)
-	createSnapshotTag(buildTime, &buildOptions)
-	useCustomDockerFile(&buildOptions)
-
-	file, err := os.Open(path)
+	_, err := cli.RegistryLogin(ctx, authConfig)
 	if err != nil {
 		return err
 	}
-	if _, err := cli.ImageBuild(ctx, file, buildOptions); err != nil {
+
+	canonicalName := readServerAddress() + "/" + name
+	canonicalTaggedName := canonicalName + ":" + translateRefToTag(os.Getenv("GITHUB_REF"))
+
+	buildOptions := types.ImageBuildOptions{}
+	if os.Getenv("INPUT_CACHE") != "" {
+		if pullResponse, err := cli.ImagePull(ctx, canonicalTaggedName, types.ImagePullOptions{
+			RegistryAuth: authString(authConfig),
+		}); err == nil {
+			defer pullResponse.Close()
+			logPull(pullResponse)
+			buildOptions.CacheFrom = []string{canonicalTaggedName}
+		}
+	}
+
+	createLatestTag(&buildOptions, canonicalTaggedName)
+	createSnapshotTag(&buildOptions, buildTime, canonicalName)
+	useCustomDockerFile(&buildOptions)
+
+	compressedInput, err := compressInput(path)
+	if err != nil {
 		return err
 	}
 
-	for _, tag := range buildOptions.Tags {
-		imgRef := name + ":" + tag
-		r, err := cli.ImagePush(ctx, imgRef, types.ImagePushOptions{})
+	imageResponse, err := cli.ImageBuild(ctx, compressedInput, buildOptions)
+	if err != nil {
+		return err
+	}
+	defer imageResponse.Body.Close()
+	logBuild(imageResponse)
+
+	for _, ref := range buildOptions.Tags {
+		pushResponse, err := cli.ImagePush(ctx, ref, types.ImagePushOptions{
+			RegistryAuth: authString(authConfig),
+		})
 		if err != nil {
 			return err
 		}
-		r.Close()
+		defer pushResponse.Close()
+		logPush(pushResponse)
 	}
 
 	return nil
 }
 
-func createSnapshotTag(buildTime time.Time, buildOptions *types.ImageBuildOptions) {
+func logPull(pullResponse io.ReadCloser) {
+	scanner := bufio.NewScanner(pullResponse)
+	for scanner.Scan() {
+		fmt.Println(scanner.Text())
+	}
+}
+
+func logBuild(imageResponse types.ImageBuildResponse) {
+	scanner := bufio.NewScanner(imageResponse.Body)
+	for scanner.Scan() {
+		var buildLogEntries BuildLog
+		if err := json.Unmarshal(scanner.Bytes(), &buildLogEntries); err == nil {
+			fmt.Println(buildLogEntries.Entry)
+		}
+	}
+}
+
+func logPush(pushResponse io.ReadCloser) {
+	scanner := bufio.NewScanner(pushResponse)
+	for scanner.Scan() {
+		var pushLogEntry PushLog
+		if err := json.Unmarshal(scanner.Bytes(), &pushLogEntry); err == nil {
+			fmt.Println(pushLogEntry.Entry)
+		}
+	}
+}
+
+func createLatestTag(buildOptions *types.ImageBuildOptions, canonicalTaggedName string) {
+	buildOptions.Tags = []string{canonicalTaggedName}
+}
+
+func compressInput(path string) (*os.File, error) {
+	var files []string
+	if err := filepath.Walk(path, func(path string, info os.FileInfo, err error) error {
+		files = append(files, path)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	tmpDir, _ := ioutil.TempDir("", "*")
+	filePath := filepath.Join(tmpDir, "test.tar")
+	if err := archiver.Archive(files, filePath); err != nil {
+		return nil, err
+	}
+	compressedContext, err := os.Open(filePath)
+	if err != nil {
+		return nil, err
+	}
+	return compressedContext, err
+}
+
+func authString(authConfig types.AuthConfig) string {
+	encodedJSON, _ := json.Marshal(authConfig)
+	return base64.URLEncoding.EncodeToString(encodedJSON)
+}
+
+func createSnapshotTag(buildOptions *types.ImageBuildOptions, buildTime time.Time, canonicalName string) {
 	if os.Getenv("INPUT_SNAPSHOT") != "" {
 		snapshotTag := buildTime.Format("20060102150405") + os.Getenv("GITHUB_SHA")[:6]
-		buildOptions.Tags = append(buildOptions.Tags, snapshotTag)
+		buildOptions.Tags = append(buildOptions.Tags, canonicalName+":"+snapshotTag)
 	}
 }
 
@@ -84,15 +160,13 @@ func useCustomDockerFile(buildOptions *types.ImageBuildOptions) {
 	}
 }
 
-func useTags(buildOptions *types.ImageBuildOptions) {
-	ref := os.Getenv("GITHUB_REF")
+func translateRefToTag(ref string) (tag string) {
 	if ref == "refs/heads/master" {
-		buildOptions.Tags = []string{"latest"}
+		return "latest"
 	} else if strings.HasPrefix(ref, "refs/tags") {
-		buildOptions.Tags = []string{"latest"}
-	} else {
-		buildOptions.Tags = []string{strings.TrimPrefix(ref, "refs/heads/")}
+		return "latest"
 	}
+	return strings.TrimPrefix(ref, "refs/heads/")
 }
 
 func readServerAddress() string {
@@ -100,7 +174,7 @@ func readServerAddress() string {
 	if customRegistry != "" {
 		return customRegistry
 	}
-	return "registry.hub.docker.com"
+	return "docker.io"
 }
 
 func sanitizeInput(name string, username string, password string) error {
@@ -112,4 +186,12 @@ func sanitizeInput(name string, username string, password string) error {
 		return errors.New("Unable to find the password. Did you set with.password?")
 	}
 	return nil
+}
+
+type BuildLog struct {
+	Entry string `json:"stream"`
+}
+
+type PushLog struct {
+	Entry string `json:"status"`
 }

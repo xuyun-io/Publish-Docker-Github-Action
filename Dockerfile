@@ -1,6 +1,6 @@
 FROM golang:1.13.0-alpine as build
 ADD . / src/
-ENV GOOS=linux GARCH=amd64 CGO_ENABLED=0
+ENV GOOS=linux GARCH=amd64 CGO_ENABLED=0 GOFLAGS='-mod=vendor'
 RUN cd src \
  && go test ./... \
  && go build -o /entrypoint entrypoint.go \
@@ -20,4 +20,4 @@ RUN apk update \
   && apk add --no-cache git
 
 COPY --from=build /entrypoint /entrypoint
-#ENTRYPOINT ["/entrypoint"]
+ENTRYPOINT ["/entrypoint"]
