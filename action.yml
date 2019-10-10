@@ -31,7 +31,7 @@ inputs:
   cache:
     description: 'Use cache when you have big images, that you would only like to build partially'
     required: false
- outputs:
+outputs:
   tag:
     description: 'Is the tag, which was pushed'
   snapshot-tag:
