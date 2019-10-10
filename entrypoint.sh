@@ -52,8 +52,9 @@ function translateDockerTag() {
     TAG=$(echo ${INPUT_NAME} | cut -d':' -f2)
     INPUT_NAME=$(echo ${INPUT_NAME} | cut -d':' -f1)
   elif isOnMaster; then
-#    TAG="latest"
-     TAG=$(date +%Y%m%d%H%M%S)-${GITHUB_SHA}
+#     TAG="latest"
+#     TAG=$(date +%Y%m%d%H%M%S)-${GITHUB_SHA}
+     TAG=${GITHUB_SHA}
   elif isGitTag; then
     TAG="latest"
   elif isPullRequest; then
