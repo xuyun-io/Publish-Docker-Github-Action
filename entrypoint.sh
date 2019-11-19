@@ -54,8 +54,6 @@ function translateDockerTag() {
   elif isOnMaster; then
 #     TAG=$(date +%Y%m%d%H%M%S)-$(echo ${GITHUB_SHA} | cut -c1-8)
      TAG="latest"
-  elif isOnReleaseBranch; then
-     TAG=$(date +%Y%m%d%H%M%S)-$(echo ${GITHUB_SHA} | cut -c1-8)-${BRANCH}
   elif isOnDev; then
      TAG="latest"
   elif isGitTag; then
@@ -63,7 +61,7 @@ function translateDockerTag() {
   elif isPullRequest; then
     TAG="${GITHUB_SHA}"
   else
-    TAG="${BRANCH}"
+    TAG=$(date +%Y%m%d%H%M%S)-$(echo ${GITHUB_SHA} | cut -c1-8)-${BRANCH}
   fi;
 }
 
@@ -77,10 +75,6 @@ function isOnMaster() {
 
 function isOnDev() {
   [ "${BRANCH}" = "develop" ]
-}
-
-function isOnReleaseBranch() {
-  [ "${BRANCH}" = "v[0-9].[0-9].[0-9]*" ]
 }
 
 function isGitTag() {
